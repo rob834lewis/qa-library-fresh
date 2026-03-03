@@ -33,9 +33,20 @@ Write into a SQL Server
 
 import pandas as pd
 import numpy as np
-import os, re
-import urllib
+import os, re, urllib, logging
 from sqlalchemy import create_engine
+
+from common.functions import intck
+
+    # ---------------
+
+# ---------------
+# --- Logging ---
+# --------------- 
+
+# this should ultimately go to a file
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
     # ---------------
 
@@ -120,13 +131,28 @@ def duration_to_days(value):
     
     return number * day_conversion_map[unit]
 
+
+def write_to_sql(df, table_name, db_schema, if_exists = "replace"):
+
+    rows_written = df.to_sql(
+        name      = table_name,
+        con       = engine,
+        schema    = db_schema,
+        if_exists = if_exists,   # "fail" | "replace" | "append"
+        index     = False,
+        chunksize = 5000,       
+        method    = "multi"        
+    )
+
+    return rows_written
+
     # ---------------
 
 # ----------------------
 # --- SQL Connection ---
 # ----------------------
 
-
+# MS SQL connection using Windows Authentication (Trusted Connection)
 server   = "localhost"
 database = "Library"
 driver   = "ODBC Driver 17 for SQL Server"
@@ -148,8 +174,6 @@ engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", fast_executema
 # --- Main ---
 # ------------ 
 
-# <<< Need logging >>>
-
 # data directory
 data_dir = "C:\\Users\\Admin\\qa-library-fresh\\data"
 
@@ -158,7 +182,7 @@ df_files = pd.DataFrame(os.listdir(data_dir), columns=["filename"])
 
 if len(df_files.index) > 0:
 
-    print("Files have been detected")
+    logger.info("Files have been detected")
 
     # here we know what files to expect, this is no always the case, would normally need additional checks 
     expected_files = ["03_Library Systembook.csv", "03_Library SystemCustomers.csv"]
@@ -168,7 +192,7 @@ if len(df_files.index) > 0:
 
     if len(valid_df_files.index) > 0:
 
-        print("Expected files detected")
+        logger.info("Expected files detected")
 
         for fname in valid_df_files['filename']:
 
@@ -178,7 +202,7 @@ if len(df_files.index) > 0:
 
             if fname == '03_Library SystemCustomers.csv':
 
-                print("Processing System Customers")
+                logger.info("Processing System Customers")
 
                 # read in csv file                
                 df_system_customers = pd.read_csv(os.path.join(data_dir, fname))
@@ -202,7 +226,7 @@ if len(df_files.index) > 0:
 
                     if len(df_system_customers_blanks.index) > 0:
 
-                        print('Blank Records on System Customers file')
+                        logger.info('Blank Records on System Customers file')
 
                     # remove blanks
                     df_system_customers = df_system_customers[~mask_df_system_customers_blanks]
@@ -215,27 +239,23 @@ if len(df_files.index) > 0:
                         # set name to string - should include checks here as well really
                         df_system_customers['customer_name'] = df_system_customers['customer_name'].astype('string')
 
-                        # UPLOAD TO SQL HERE
-                        table_name = "system_customers"
-                        schema     = "dbo"  
+                        # upload to SQL
+                        sql_system_customers_rows_written = write_to_sql(df_system_customers, "system_customers", "dbo")
+   
+                        # check upload
+                        if len(df_system_customers.index) == sql_system_customers_rows_written:
+                            logger.info("System Customers succesfully uploaded to SQL")
 
-                        sql_system_customers_rows_written = df_system_customers.to_sql(
-                            name=table_name,
-                            con=engine,
-                            schema=schema,
-                            if_exists="replace",   # "fail" | "replace" | "append"
-                            index=False,
-                            chunksize=5000,       
-                            method="multi"        
-                        )
+                        else:
+                            logger.error(f"Record mismatch on System Customers SQL upload {sql_system_customers_rows_written} rows written instead of {len(df_system_customers.index)}")
 
                     else:
 
-                        print('No non blank records on System Customers file')
+                        logger.info('No non blank records on System Customers file')
 
                 else: 
 
-                    print("System Customers file does not have the correct columns in the correct order")
+                    logger.info("System Customers file does not have the correct columns in the correct order")
 
             # -------------------
             # --- System Book ---
@@ -243,7 +263,7 @@ if len(df_files.index) > 0:
 
             if fname == '03_Library Systembook.csv':
 
-                print("Processing System Books")
+                logger.info("Processing System Books")
 
                 # read in csv file
                 df_system_book = pd.read_csv(os.path.join(data_dir, fname))
@@ -267,7 +287,7 @@ if len(df_files.index) > 0:
 
                     if len(df_system_book_blanks.index) > 0:
 
-                        print('Blank Records on System Book file')
+                        logger.info('Blank Records on System Book file')
 
                     # remove blanks
                     df_system_book = df_system_book[~mask_df_system_book_blanks]
@@ -293,6 +313,7 @@ if len(df_files.index) > 0:
 
                         # convert date
                         df_system_book['checkout_date'] = pd.to_datetime(df_system_book['checkout_date'], errors='coerce', dayfirst=True)
+                        df_system_book['checkout_date'] = df_system_book['checkout_date'].astype('date32[pyarrow]')
 
                         if pd.api.types.is_string_dtype(df_system_book['return_date']):
                             df_system_book['return_date'] = df_system_book['return_date'].str.replace(r'[^0-9:/\-\s]', '', regex=True)
@@ -302,8 +323,9 @@ if len(df_files.index) > 0:
                         df_system_book['return_date_raw']   = df_system_book['return_date']
 
                         df_system_book['return_date'] = pd.to_datetime(df_system_book['return_date'], errors='coerce', dayfirst=True)
+                        df_system_book['return_date'] = df_system_book['return_date'].astype('date32[pyarrow]')
 
-                        # review dates
+                        # review dates - NEED TO INCLUDE CHECKS ON FUTURE DATES and RETURN BEFORE CHECKOUT
                         mask_null_system_book_dates = (
                             (pd.isna(df_system_book['checkout_date'])) |
                             (pd.isna(df_system_book['return_date']))
@@ -312,7 +334,7 @@ if len(df_files.index) > 0:
 
                         if len(null_system_book_dates.index) > 0:
 
-                            print("Issues detected with Date fields")
+                            logger.info("Issues detected with Date fields")
 
                             null_system_book_dates["checkout_date_reason"] = null_system_book_dates["checkout_date_raw"].apply(date_reason)
                             null_system_book_dates["return_date_reason"]   = null_system_book_dates["return_date_raw"].apply(date_reason)
@@ -332,45 +354,36 @@ if len(df_files.index) > 0:
 
                         if len(df_system_book_invalid_loan_days.index) > 0:
 
-                            print("Issues detected with Loan Period field")
+                            logger.info("Issues detected with Loan Period field")
 
                         # remove any loan period issues
                         df_system_book = df_system_book[~mask_invalid_loan_period]
 
+                        # actual loaned days intck
+                        df_system_book['actual_loaned_days'] = intck('day', df_system_book['checkout_date'], df_system_book['return_date'])
+
                         # keep fields in order
-                        df_system_book = df_system_book[['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date', 'loan_days']]
+                        df_system_book = df_system_book[['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date', 'loan_days', 'actual_loaned_days']]
                         
-                        # UPLOAD TO SQL HERE
-                        table_name = "system_book"
-                        schema     = "dbo"  
+                        # upload to SQL
+                        sql_system_book_rows_written = write_to_sql(df_system_book, "system_book", "dbo")
+   
+                        # check upload
+                        if len(df_system_book.index) == sql_system_book_rows_written:
+                            logger.info("System Book succesfully uploaded to SQL")
 
-                        sql_system_book_rows_written = df_system_book.to_sql(
-                            name=table_name,
-                            con=engine,
-                            schema=schema,
-                            if_exists="replace",   # "fail" | "replace" | "append"
-                            index=False,
-                            chunksize=5000,       
-                            method="multi"        
-                        )
-
-                        # IMPLEMENT CHECK ON RECORDS UPLOADED
+                        else:
+                            logger.error(f"Record mismatch on System Book SQL upload {sql_system_book_rows_written} rows written instead of {len(df_system_book.index)}")
 
                     else:
 
-                        print('No non blank records on System Book file')
+                        logger.info('No non blank records on System Book file')
 
                 else: 
 
-                    print("System Book file does not have the correct columns in the correct order")
-
-
-                # info
-                df_system_book.info()
-
-
+                    logger.info("System Book file does not have the correct columns in the correct order")
 
 else:
 
-    print("No Observations")
+    logger.info("No Observations")
 
