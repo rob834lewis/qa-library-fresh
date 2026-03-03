@@ -34,6 +34,8 @@ Write into a SQL Server
 import pandas as pd
 import numpy as np
 import os, re
+import urllib
+from sqlalchemy import create_engine
 
     # ---------------
 
@@ -91,7 +93,60 @@ def date_reason(s: str) -> str:
         return "Day out of range"
     return "Invalid date (e.g., day/month mismatch)"
 
+day_conversion_map = {
+    "day": 1,
+    "days": 1,
+    "week": 7,
+    "weeks": 7,
+    "month": 30,
+    "months": 30,
+    "year": 365,
+    "years": 365
+}
+
+def duration_to_days(value):
+    if pd.isna(value):
+        return pd.NA
+    
+    value = str(value).strip().lower()
+    
+    match = re.fullmatch(r"(\d+)\s*(day|days|week|weeks|month|months|year|years)", value)
+    
+    if not match:
+        return pd.NA  # flag invalid
+    
+    number = int(match.group(1))
+    unit = match.group(2)
+    
+    return number * day_conversion_map[unit]
+
     # ---------------
+
+# ----------------------
+# --- SQL Connection ---
+# ----------------------
+
+
+server   = "localhost"
+database = "Library"
+driver   = "ODBC Driver 17 for SQL Server"
+
+params = urllib.parse.quote_plus(
+    f"DRIVER={{{driver}}};"
+    f"SERVER={server};"
+    f"DATABASE={database};"
+    "Trusted_Connection=yes;"
+    "TrustServerCertificate=yes;"
+)
+
+engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", fast_executemany=True)
+
+    # ---------------
+
+
+# ------------
+# --- Main ---
+# ------------ 
 
 # <<< Need logging >>>
 
@@ -161,6 +216,18 @@ if len(df_files.index) > 0:
                         df_system_customers['customer_name'] = df_system_customers['customer_name'].astype('string')
 
                         # UPLOAD TO SQL HERE
+                        table_name = "system_customers"
+                        schema     = "dbo"  
+
+                        sql_system_customers_rows_written = df_system_customers.to_sql(
+                            name=table_name,
+                            con=engine,
+                            schema=schema,
+                            if_exists="replace",   # "fail" | "replace" | "append"
+                            index=False,
+                            chunksize=5000,       
+                            method="multi"        
+                        )
 
                     else:
 
@@ -183,7 +250,7 @@ if len(df_files.index) > 0:
 
                 # check columns
                 expected_book_columns = ['Id', 'Books', 'Book checkout',  'Book Returned', 'Days allowed to borrow', 'Customer ID' ]
-                renamed_book_columns  = ['book_id', 'book_name', 'checkout_date', 'return_date', 'loan_period', 'customer_id']
+                renamed_book_columns  = ['loan_id', 'book_name', 'checkout_date', 'return_date', 'loan_period', 'customer_id']
 
                 if list(df_system_book.columns) == expected_book_columns:
 
@@ -191,9 +258,9 @@ if len(df_files.index) > 0:
                     df_system_book_rename = dict(zip(expected_book_columns, renamed_book_columns))   
                     df_system_book = df_system_book.rename(columns = df_system_book_rename)
 
-                    # Check for blank records in any column - should really have logic to check for partials here as well
+                    # Check for blank records in any column apart from return_date
                     mask_df_system_book_blanks = (
-                        (df_system_book.isna().any(axis=1))
+                        (df_system_book.drop(columns=["return_date"]).isna().any(axis=1))
                     )
 
                     df_system_book_blanks = df_system_book[mask_df_system_book_blanks].copy()
@@ -210,7 +277,7 @@ if len(df_files.index) > 0:
                         # convert data types
 
                         # convert id columns to int32
-                        df_system_book = enforce_int32(df_system_book, 'book_id')
+                        df_system_book = enforce_int32(df_system_book, 'loan_id')
                         df_system_book = enforce_int32(df_system_book, 'customer_id')
 
                         # set name to string - should include checks here as well really
@@ -245,10 +312,49 @@ if len(df_files.index) > 0:
 
                         if len(null_system_book_dates.index) > 0:
 
+                            print("Issues detected with Date fields")
+
                             null_system_book_dates["checkout_date_reason"] = null_system_book_dates["checkout_date_raw"].apply(date_reason)
+                            null_system_book_dates["return_date_reason"]   = null_system_book_dates["return_date_raw"].apply(date_reason)
 
+                        # remove any date issue lines
+                        df_system_book = df_system_book[~mask_null_system_book_dates]
 
+                        # convert loan period
+                        # df_system_book['loan_period'].value_counts(dropna=False)
+
+                        df_system_book["loan_days"] = df_system_book["loan_period"].apply(duration_to_days).astype("int32")
+
+                        mask_invalid_loan_period = (
+                            (pd.isna(df_system_book["loan_days"]))
+                        )
+                        df_system_book_invalid_loan_days = df_system_book[mask_invalid_loan_period].copy()
+
+                        if len(df_system_book_invalid_loan_days.index) > 0:
+
+                            print("Issues detected with Loan Period field")
+
+                        # remove any loan period issues
+                        df_system_book = df_system_book[~mask_invalid_loan_period]
+
+                        # keep fields in order
+                        df_system_book = df_system_book[['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date', 'loan_days']]
+                        
                         # UPLOAD TO SQL HERE
+                        table_name = "system_book"
+                        schema     = "dbo"  
+
+                        sql_system_book_rows_written = df_system_book.to_sql(
+                            name=table_name,
+                            con=engine,
+                            schema=schema,
+                            if_exists="replace",   # "fail" | "replace" | "append"
+                            index=False,
+                            chunksize=5000,       
+                            method="multi"        
+                        )
+
+                        # IMPLEMENT CHECK ON RECORDS UPLOADED
 
                     else:
 
