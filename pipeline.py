@@ -14,6 +14,7 @@
   Modifications
   -------------
   03MAR2026   RLEWIS  Initial Version
+  04MAR2026   RLEWIS  Added deduping and argparse option
 ----------------------------------------------------------------------------------------------------------------------:
 """
 
@@ -35,6 +36,7 @@ import pandas as pd
 import numpy as np
 import os, re, urllib, logging
 from sqlalchemy import create_engine
+import argparse
 
 from common.functions import intck
 
@@ -169,221 +171,260 @@ engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", fast_executema
 
     # ---------------
 
+# ----------------
+# --- argparse ---
+# ----------------
+
+parser = argparse.ArgumentParser()
+
+parser.add_argument("--output_type")
+
+args = parser.parse_args()
+
+    # ---------------
 
 # ------------
 # --- Main ---
 # ------------ 
 
-# data directory
-data_dir = "C:\\Users\\Admin\\qa-library-fresh\\data"
+if __name__ == '__main__': 
 
-# scan data directory for files
-df_files = pd.DataFrame(os.listdir(data_dir), columns=["filename"])
+    # data directory
+    data_dir = "C:\\Users\\Admin\\qa-library-fresh\\data"
 
-if len(df_files.index) > 0:
+    # scan data directory for files
+    df_files = pd.DataFrame(os.listdir(data_dir), columns=["filename"])
 
-    logger.info("Files have been detected")
+    if len(df_files.index) > 0:
 
-    # here we know what files to expect, this is no always the case, would normally need additional checks 
-    expected_files = ["03_Library Systembook.csv", "03_Library SystemCustomers.csv"]
+        logger.info("Files have been detected")
 
-    # are the detected files the expected files?
-    valid_df_files = df_files[df_files["filename"].isin(expected_files)]
+        # here we know what files to expect, this is no always the case, would normally need additional checks 
+        expected_files = ["03_Library Systembook.csv", "03_Library SystemCustomers.csv"]
 
-    if len(valid_df_files.index) > 0:
+        # are the detected files the expected files?
+        valid_df_files = df_files[df_files["filename"].isin(expected_files)]
 
-        logger.info("Expected files detected")
+        if len(valid_df_files.index) > 0:
 
-        for fname in valid_df_files['filename']:
+            logger.info("Expected files detected")
 
-            # ------------------------
-            # --- System Customers ---
-            # ------------------------
+            for fname in valid_df_files['filename']:
 
-            if fname == '03_Library SystemCustomers.csv':
+                # ------------------------
+                # --- System Customers ---
+                # ------------------------
 
-                logger.info("Processing System Customers")
+                if fname == '03_Library SystemCustomers.csv':
 
-                # read in csv file                
-                df_system_customers = pd.read_csv(os.path.join(data_dir, fname))
+                    logger.info("Processing System Customers")
 
-                # check columns
-                expected_customer_columns = ['Customer ID', 'Customer Name']
-                renamed_customer_columns  = ['customer_id', 'customer_name']
+                    # read in csv file                
+                    df_system_customers = pd.read_csv(os.path.join(data_dir, fname))
 
-                if list(df_system_customers.columns) == expected_customer_columns:
+                    # check columns
+                    expected_customer_columns = ['Customer ID', 'Customer Name']
+                    renamed_customer_columns  = ['customer_id', 'customer_name']
 
-                    # rename columns
-                    df_system_customers_rename = dict(zip(expected_customer_columns, renamed_customer_columns))   
-                    df_system_customers = df_system_customers.rename(columns = df_system_customers_rename)
+                    if list(df_system_customers.columns) == expected_customer_columns:
 
-                    # Check for blank records in any column - should really have logic to check for partials here as well
-                    mask_df_system_customers_blanks = (
-                        (df_system_customers.isna().any(axis=1))
-                    )
+                        # rename columns
+                        df_system_customers_rename = dict(zip(expected_customer_columns, renamed_customer_columns))   
+                        df_system_customers = df_system_customers.rename(columns = df_system_customers_rename)
 
-                    df_system_customers_blanks = df_system_customers[mask_df_system_customers_blanks].copy()
+                        # Check for blank records in any column - should really have logic to check for partials here as well
+                        mask_df_system_customers_blanks = (
+                            (df_system_customers.isna().any(axis=1))
+                        )
 
-                    if len(df_system_customers_blanks.index) > 0:
+                        df_system_customers_blanks = df_system_customers[mask_df_system_customers_blanks].copy()
 
-                        logger.info('Blank Records on System Customers file')
+                        if len(df_system_customers_blanks.index) > 0:
 
-                    # remove blanks
-                    df_system_customers = df_system_customers[~mask_df_system_customers_blanks]
+                            logger.info('Blank Records on System Customers file')
 
-                    if len(df_system_customers.index) > 0:
-                           
-                        # convert id column to int32
-                        df_system_customers = enforce_int32(df_system_customers, 'customer_id')
+                        # remove blanks
+                        df_system_customers = df_system_customers[~mask_df_system_customers_blanks]
 
-                        # set name to string - should include checks here as well really
-                        df_system_customers['customer_name'] = df_system_customers['customer_name'].astype('string')
+                        if len(df_system_customers.index) > 0:
+                            
+                            # convert id column to int32
+                            df_system_customers = enforce_int32(df_system_customers, 'customer_id')
 
-                        # upload to SQL
-                        sql_system_customers_rows_written = write_to_sql(df_system_customers, "system_customers", "dbo")
-   
-                        # check upload
-                        if len(df_system_customers.index) == sql_system_customers_rows_written:
-                            logger.info("System Customers succesfully uploaded to SQL")
+                            # set name to string - should include checks here as well really
+                            df_system_customers['customer_name'] = df_system_customers['customer_name'].astype('string')
+
+                            # check for dupes
+                            df_system_customers = df_system_customers.sort_values(by = ['customer_id', 'customer_name'])
+                            df_system_customers = df_system_customers.drop_duplicates(subset = ['customer_id', 'customer_name'], keep = 'last')
+
+                            # output cleaned files
+
+                            # output csv
+                            
+                            if args.output_type == 'csv':
+                                df_system_customers.to_csv(os.path.join(data_dir,'system_customers.csv'))
+
+                            # upload to SQL
+                            
+                            if args.output_type == 'sql':
+                                sql_system_customers_rows_written = write_to_sql(df_system_customers, "system_customers", "dbo")
+    
+                                # check upload
+                                if len(df_system_customers.index) == sql_system_customers_rows_written:
+                                    logger.info("System Customers succesfully uploaded to SQL")
+
+                                else:
+                                    logger.error(f"Record mismatch on System Customers SQL upload {sql_system_customers_rows_written} rows written instead of {len(df_system_customers.index)}")
 
                         else:
-                            logger.error(f"Record mismatch on System Customers SQL upload {sql_system_customers_rows_written} rows written instead of {len(df_system_customers.index)}")
 
-                    else:
+                            logger.info('No non blank records on System Customers file')
 
-                        logger.info('No non blank records on System Customers file')
+                    else: 
 
-                else: 
+                        logger.info("System Customers file does not have the correct columns in the correct order")
 
-                    logger.info("System Customers file does not have the correct columns in the correct order")
+                # -------------------
+                # --- System Book ---
+                # -------------------
 
-            # -------------------
-            # --- System Book ---
-            # -------------------
+                if fname == '03_Library Systembook.csv':
 
-            if fname == '03_Library Systembook.csv':
+                    logger.info("Processing System Books")
 
-                logger.info("Processing System Books")
+                    # read in csv file
+                    df_system_book = pd.read_csv(os.path.join(data_dir, fname))
 
-                # read in csv file
-                df_system_book = pd.read_csv(os.path.join(data_dir, fname))
+                    # check columns
+                    expected_book_columns = ['Id', 'Books', 'Book checkout',  'Book Returned', 'Days allowed to borrow', 'Customer ID' ]
+                    renamed_book_columns  = ['loan_id', 'book_name', 'checkout_date', 'return_date', 'loan_period', 'customer_id']
 
-                # check columns
-                expected_book_columns = ['Id', 'Books', 'Book checkout',  'Book Returned', 'Days allowed to borrow', 'Customer ID' ]
-                renamed_book_columns  = ['loan_id', 'book_name', 'checkout_date', 'return_date', 'loan_period', 'customer_id']
+                    if list(df_system_book.columns) == expected_book_columns:
 
-                if list(df_system_book.columns) == expected_book_columns:
+                        # rename columns
+                        df_system_book_rename = dict(zip(expected_book_columns, renamed_book_columns))   
+                        df_system_book = df_system_book.rename(columns = df_system_book_rename)
 
-                    # rename columns
-                    df_system_book_rename = dict(zip(expected_book_columns, renamed_book_columns))   
-                    df_system_book = df_system_book.rename(columns = df_system_book_rename)
-
-                    # Check for blank records in any column apart from return_date
-                    mask_df_system_book_blanks = (
-                        (df_system_book.drop(columns=["return_date"]).isna().any(axis=1))
-                    )
-
-                    df_system_book_blanks = df_system_book[mask_df_system_book_blanks].copy()
-
-                    if len(df_system_book_blanks.index) > 0:
-
-                        logger.info('Blank Records on System Book file')
-
-                    # remove blanks
-                    df_system_book = df_system_book[~mask_df_system_book_blanks]
-
-                    if len(df_system_book.index) > 0:
-                           
-                        # convert data types
-
-                        # convert id columns to int32
-                        df_system_book = enforce_int32(df_system_book, 'loan_id')
-                        df_system_book = enforce_int32(df_system_book, 'customer_id')
-
-                        # set name to string - should include checks here as well really
-                        df_system_book['book_name'] = df_system_book['book_name'].astype('string')
-
-                        # resolve date fields
-                        if pd.api.types.is_string_dtype(df_system_book['checkout_date']):
-                            df_system_book['checkout_date'] = df_system_book['checkout_date'].str.replace(r'[^0-9:/\-\s]', '', regex=True)
-                            df_system_book['checkout_date'] = df_system_book['checkout_date'].str.strip()
-
-                        # create raw date version
-                        df_system_book['checkout_date_raw'] = df_system_book['checkout_date']
-
-                        # convert date
-                        df_system_book['checkout_date'] = pd.to_datetime(df_system_book['checkout_date'], errors='coerce', dayfirst=True)
-                        df_system_book['checkout_date'] = df_system_book['checkout_date'].astype('date32[pyarrow]')
-
-                        if pd.api.types.is_string_dtype(df_system_book['return_date']):
-                            df_system_book['return_date'] = df_system_book['return_date'].str.replace(r'[^0-9:/\-\s]', '', regex=True)
-                            df_system_book['return_date'] = df_system_book['return_date'].str.strip()
-
-                        # create raw date version
-                        df_system_book['return_date_raw']   = df_system_book['return_date']
-
-                        df_system_book['return_date'] = pd.to_datetime(df_system_book['return_date'], errors='coerce', dayfirst=True)
-                        df_system_book['return_date'] = df_system_book['return_date'].astype('date32[pyarrow]')
-
-                        # review dates - NEED TO INCLUDE CHECKS ON FUTURE DATES and RETURN BEFORE CHECKOUT
-                        mask_null_system_book_dates = (
-                            (pd.isna(df_system_book['checkout_date'])) |
-                            (pd.isna(df_system_book['return_date']))
+                        # Check for blank records in any column apart from return_date
+                        mask_df_system_book_blanks = (
+                            (df_system_book.drop(columns=["return_date"]).isna().any(axis=1))
                         )
-                        null_system_book_dates = df_system_book[mask_null_system_book_dates].copy()
 
-                        if len(null_system_book_dates.index) > 0:
+                        df_system_book_blanks = df_system_book[mask_df_system_book_blanks].copy()
 
-                            logger.info("Issues detected with Date fields")
+                        if len(df_system_book_blanks.index) > 0:
 
-                            null_system_book_dates["checkout_date_reason"] = null_system_book_dates["checkout_date_raw"].apply(date_reason)
-                            null_system_book_dates["return_date_reason"]   = null_system_book_dates["return_date_raw"].apply(date_reason)
+                            logger.info('Blank Records on System Book file')
 
-                        # remove any date issue lines
-                        df_system_book = df_system_book[~mask_null_system_book_dates]
+                        # remove blanks
+                        df_system_book = df_system_book[~mask_df_system_book_blanks]
 
-                        # convert loan period
-                        # df_system_book['loan_period'].value_counts(dropna=False)
+                        if len(df_system_book.index) > 0:
+                            
+                            # convert data types
 
-                        df_system_book["loan_days"] = df_system_book["loan_period"].apply(duration_to_days).astype("int32")
+                            # convert id columns to int32
+                            df_system_book = enforce_int32(df_system_book, 'loan_id')
+                            df_system_book = enforce_int32(df_system_book, 'customer_id')
 
-                        mask_invalid_loan_period = (
-                            (pd.isna(df_system_book["loan_days"]))
-                        )
-                        df_system_book_invalid_loan_days = df_system_book[mask_invalid_loan_period].copy()
+                            # set name to string - should include checks here as well really
+                            df_system_book['book_name'] = df_system_book['book_name'].astype('string')
 
-                        if len(df_system_book_invalid_loan_days.index) > 0:
+                            # resolve date fields
+                            if pd.api.types.is_string_dtype(df_system_book['checkout_date']):
+                                df_system_book['checkout_date'] = df_system_book['checkout_date'].str.replace(r'[^0-9:/\-\s]', '', regex=True)
+                                df_system_book['checkout_date'] = df_system_book['checkout_date'].str.strip()
 
-                            logger.info("Issues detected with Loan Period field")
+                            # create raw date version
+                            df_system_book['checkout_date_raw'] = df_system_book['checkout_date']
 
-                        # remove any loan period issues
-                        df_system_book = df_system_book[~mask_invalid_loan_period]
+                            # convert date
+                            df_system_book['checkout_date'] = pd.to_datetime(df_system_book['checkout_date'], errors='coerce', dayfirst=True)
+                            df_system_book['checkout_date'] = df_system_book['checkout_date'].astype('date32[pyarrow]')
 
-                        # actual loaned days intck
-                        df_system_book['actual_loaned_days'] = intck('day', df_system_book['checkout_date'], df_system_book['return_date'])
+                            if pd.api.types.is_string_dtype(df_system_book['return_date']):
+                                df_system_book['return_date'] = df_system_book['return_date'].str.replace(r'[^0-9:/\-\s]', '', regex=True)
+                                df_system_book['return_date'] = df_system_book['return_date'].str.strip()
 
-                        # keep fields in order
-                        df_system_book = df_system_book[['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date', 'loan_days', 'actual_loaned_days']]
-                        
-                        # upload to SQL
-                        sql_system_book_rows_written = write_to_sql(df_system_book, "system_book", "dbo")
-   
-                        # check upload
-                        if len(df_system_book.index) == sql_system_book_rows_written:
-                            logger.info("System Book succesfully uploaded to SQL")
+                            # create raw date version
+                            df_system_book['return_date_raw']   = df_system_book['return_date']
+
+                            df_system_book['return_date'] = pd.to_datetime(df_system_book['return_date'], errors='coerce', dayfirst=True)
+                            df_system_book['return_date'] = df_system_book['return_date'].astype('date32[pyarrow]')
+
+                            # review dates - NEED TO INCLUDE CHECKS ON FUTURE DATES and RETURN BEFORE CHECKOUT
+                            mask_null_system_book_dates = (
+                                (pd.isna(df_system_book['checkout_date'])) |
+                                (pd.isna(df_system_book['return_date']))
+                            )
+                            null_system_book_dates = df_system_book[mask_null_system_book_dates].copy()
+
+                            if len(null_system_book_dates.index) > 0:
+
+                                logger.info("Issues detected with Date fields")
+
+                                null_system_book_dates["checkout_date_reason"] = null_system_book_dates["checkout_date_raw"].apply(date_reason)
+                                null_system_book_dates["return_date_reason"]   = null_system_book_dates["return_date_raw"].apply(date_reason)
+
+                            # remove any date issue lines
+                            df_system_book = df_system_book[~mask_null_system_book_dates]
+
+                            # convert loan period
+                            # df_system_book['loan_period'].value_counts(dropna=False)
+
+                            df_system_book["loan_days"] = df_system_book["loan_period"].apply(duration_to_days).astype("int32")
+
+                            mask_invalid_loan_period = (
+                                (pd.isna(df_system_book["loan_days"]))
+                            )
+                            df_system_book_invalid_loan_days = df_system_book[mask_invalid_loan_period].copy()
+
+                            if len(df_system_book_invalid_loan_days.index) > 0:
+
+                                logger.info("Issues detected with Loan Period field")
+
+                            # remove any loan period issues
+                            df_system_book = df_system_book[~mask_invalid_loan_period]
+
+                            # actual loaned days intck
+                            df_system_book['actual_loaned_days'] = intck('day', df_system_book['checkout_date'], df_system_book['return_date'])
+
+                            # keep fields in order
+                            df_system_book = df_system_book[['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date', 'loan_days', 'actual_loaned_days']]
+
+                            # check for dupes
+                            df_system_book = df_system_book.sort_values(by = ['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date' ])
+                            df_system_book = df_system_book.drop_duplicates(subset = ['loan_id', 'customer_id', 'book_name', 'checkout_date'], keep = 'last')
+
+                            # output cleaned files
+
+                            # output csv
+                            
+                            if args.output_type == 'csv':
+                                df_system_book.to_csv(os.path.join(data_dir,'system_book.csv'))
+
+                            # upload to SQL
+                            
+                            if args.output_type == 'sql':
+                                sql_system_book_rows_written = write_to_sql(df_system_book, "system_book", "dbo")
+        
+                                # check upload
+                                if len(df_system_book.index) == sql_system_book_rows_written:
+                                    logger.info("System Book succesfully uploaded to SQL")
+
+                                else:
+                                    logger.error(f"Record mismatch on System Book SQL upload {sql_system_book_rows_written} rows written instead of {len(df_system_book.index)}")
 
                         else:
-                            logger.error(f"Record mismatch on System Book SQL upload {sql_system_book_rows_written} rows written instead of {len(df_system_book.index)}")
 
-                    else:
+                            logger.info('No non blank records on System Book file')
 
-                        logger.info('No non blank records on System Book file')
+                    else: 
 
-                else: 
+                        logger.info("System Book file does not have the correct columns in the correct order")
 
-                    logger.info("System Book file does not have the correct columns in the correct order")
+    else:
 
-else:
-
-    logger.info("No Observations")
+        logger.info("No Observations")
 

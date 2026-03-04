@@ -1,11 +1,65 @@
-# Environments
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
 .env
-.envrc
 .venv
 env/
 venv/
 ENV/
-env.bak/
-venv.bak/
 
-__pycache__/
+# Environment files
+*.env
+.env.*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyInstaller
+*.spec
+
+# Logs
+*.log
+
+# Unit test / coverage reports
+.coverage
+*.cover
+*.py,cover
+htmlcov/
+
+# mypy
+.mypy_cache/
+
+# VSCode settings
+.vscode/
+
+# GCP / BigQuery
+# Service account keys (JSON)
+*-key.json
+service-account.json
+
+# If you use terraform or gcloud configs locally
+.terraform/
+terraform.tfstate*
+.gcloud/
+#*.yaml
+
+# Local configs (API keys, creds, etc.)
+#config.yaml
+#config.yml
+credentials/
+
+# data folder
+# data/
+
+# testing folder
+testing/
+
+# database files
+*.db
+
+*.pyc
+.pyc.*
