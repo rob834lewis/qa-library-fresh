@@ -22,9 +22,9 @@
 
 Task: Clean the datasets and return two csv files
 
-Want to see ETL pipe that takes the data and output clean ones
-
 Write into a SQL Server
+
+Create activity tracker
 
 """
 
@@ -37,8 +37,11 @@ import numpy as np
 import os, re, urllib, logging
 from sqlalchemy import create_engine
 import argparse
+from pathlib import Path
+from datetime               import datetime, date, timedelta  
+from dateutil.relativedelta import relativedelta              
 
-from common.functions import intck
+from common.functions import intck, enforce_int32, date_reason, duration_to_days, write_to_sql
 
     # ---------------
 
@@ -56,118 +59,19 @@ logger = logging.getLogger(__name__)
 # --- Functions ---
 # ----------------- 
 
-def enforce_int32(df, col):
+# initialise metric rows for Power BI use
+metrics_rows = []
+metric_order = 0
+
+today = datetime.now().date()
+
+def log_metric(metric_type: str, action: str, records: int, **extra):
     
-    """
-    
-    function to convert column to int32 
+    global metric_order
 
-    Parameters:
-    df  : the dataframe
-    col : the column
+    metric_order += 1
 
-    Returns:
-    df with int32 formatted version of column
-
-    """
-
-    series = df[col]
-    
-    # Step 1 — If not numeric, attempt conversion
-    if not pd.api.types.is_numeric_dtype(series):
-        series = pd.to_numeric(series, errors="coerce")
-    
-    # Step 2 — Check for non-convertible values
-    if series.isna().any():
-        raise ValueError(f"{col} contains non-numeric values.")
-    
-    # Step 3 — Ensure values are whole numbers
-    if not np.all(np.floor(series) == series):
-        raise ValueError(f"{col} contains non-integer numeric values.")
-    
-    # Step 4 — Convert to int32
-    df[col] = series.astype("int32")
-    
-    return df
-
-def date_reason(s: str) -> str:
-    if s is None:
-        return "Missing"
-    s = str(s).strip()
-    if s == "":
-        return "Missing"
-    m = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", s)
-    if not m:
-        return "Unexpected format"
-    d, mo, y = map(int, m.groups())
-    if mo < 1 or mo > 12:
-        return "Month out of range"
-    if d < 1 or d > 31:
-        return "Day out of range"
-    return "Invalid date (e.g., day/month mismatch)"
-
-day_conversion_map = {
-    "day": 1,
-    "days": 1,
-    "week": 7,
-    "weeks": 7,
-    "month": 30,
-    "months": 30,
-    "year": 365,
-    "years": 365
-}
-
-def duration_to_days(value):
-    if pd.isna(value):
-        return pd.NA
-    
-    value = str(value).strip().lower()
-    
-    match = re.fullmatch(r"(\d+)\s*(day|days|week|weeks|month|months|year|years)", value)
-    
-    if not match:
-        return pd.NA  # flag invalid
-    
-    number = int(match.group(1))
-    unit = match.group(2)
-    
-    return number * day_conversion_map[unit]
-
-
-def write_to_sql(df, table_name, db_schema, if_exists = "replace"):
-
-    rows_written = df.to_sql(
-        name      = table_name,
-        con       = engine,
-        schema    = db_schema,
-        if_exists = if_exists,   # "fail" | "replace" | "append"
-        index     = False,
-        chunksize = 5000,       
-        method    = "multi"        
-    )
-
-    return rows_written
-
-    # ---------------
-
-# ----------------------
-# --- SQL Connection ---
-# ----------------------
-
-# MS SQL connection using Windows Authentication (Trusted Connection)
-server   = "localhost"
-database = "Library"
-driver   = "ODBC Driver 17 for SQL Server"
-
-params = urllib.parse.quote_plus(
-    f"DRIVER={{{driver}}};"
-    f"SERVER={server};"
-    f"DATABASE={database};"
-    "Trusted_Connection=yes;"
-    "TrustServerCertificate=yes;"
-)
-
-engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", fast_executemany=True)
+    metrics_rows.append({"order_id": int(metric_order), "date": today, "type": metric_type, "action": action, "records": int(records), **extra})
 
     # ---------------
 
@@ -175,11 +79,17 @@ engine = create_engine(f"mssql+pyodbc:///?odbc_connect={params}", fast_executema
 # --- argparse ---
 # ----------------
 
+# <<< NEED TO ADD OPTION FOR BOTH >>>
+
 parser = argparse.ArgumentParser()
 
-parser.add_argument("--output_type")
+parser.add_argument(
+    "--output_type",
+    default = "csv",   # default when not provided
+    choices = ["csv", "sql"]
+)
 
-args = parser.parse_args()
+args, unknown = parser.parse_known_args()
 
     # ---------------
 
@@ -193,7 +103,31 @@ if __name__ == '__main__':
     data_dir = "C:\\Users\\Admin\\qa-library-fresh\\data"
 
     # scan data directory for files
-    df_files = pd.DataFrame(os.listdir(data_dir), columns=["filename"])
+    files = list(Path(data_dir).iterdir())
+
+    df_files = pd.DataFrame({
+        "filename": [f.name for f in files],
+        "extension": [f.suffix for f in files]
+    })
+
+    # remove the output folder
+    df_files = df_files[df_files['filename'] != 'output']
+
+    files_detected = len(df_files.index)
+
+    log_metric("files detected", "n/a", files_detected)
+
+    # detect incorrect extensions
+    incorrect_extensions = df_files[df_files['extension'] != '.csv'].copy()
+    
+    log_metric("files with incorrect extensions", "dropped", len(incorrect_extensions.index))
+
+    if len(incorrect_extensions.index) > 0:
+
+        logger.info("Files with incorrect extensions have been identified")
+
+    # keep only csv
+    df_files = df_files[df_files['extension'] == '.csv']
 
     if len(df_files.index) > 0:
 
@@ -204,6 +138,8 @@ if __name__ == '__main__':
 
         # are the detected files the expected files?
         valid_df_files = df_files[df_files["filename"].isin(expected_files)]
+
+        log_metric("valid files detected", "n/a", len(valid_df_files.index))
 
         if len(valid_df_files.index) > 0:
 
@@ -222,11 +158,16 @@ if __name__ == '__main__':
                     # read in csv file                
                     df_system_customers = pd.read_csv(os.path.join(data_dir, fname))
 
+                    log_metric(f"{fname}", "read in", len(df_system_customers.index))
+
                     # check columns
                     expected_customer_columns = ['Customer ID', 'Customer Name']
                     renamed_customer_columns  = ['customer_id', 'customer_name']
 
                     if list(df_system_customers.columns) == expected_customer_columns:
+
+                        # what number do we want here?
+                        log_metric(f"{fname}", "all columns correct", len(expected_customer_columns))
 
                         # rename columns
                         df_system_customers_rename = dict(zip(expected_customer_columns, renamed_customer_columns))   
@@ -238,6 +179,8 @@ if __name__ == '__main__':
                         )
 
                         df_system_customers_blanks = df_system_customers[mask_df_system_customers_blanks].copy()
+                        
+                        log_metric(f"blank rows on {fname}", "dropped", len(df_system_customers_blanks.index))
 
                         if len(df_system_customers_blanks.index) > 0:
 
@@ -255,15 +198,27 @@ if __name__ == '__main__':
                             df_system_customers['customer_name'] = df_system_customers['customer_name'].astype('string')
 
                             # check for dupes
+
+                            before_count = len(df_system_customers)
+
                             df_system_customers = df_system_customers.sort_values(by = ['customer_id', 'customer_name'])
                             df_system_customers = df_system_customers.drop_duplicates(subset = ['customer_id', 'customer_name'], keep = 'last')
 
+                            after_count = len(df_system_customers)
+
+                            duplicates_removed = before_count - after_count
+
+                            log_metric(f"duplicate rows on {fname}", "dropped", duplicates_removed)
+
                             # output cleaned files
+                            df_system_customers_records = len(df_system_customers.index)
+
+                            log_metric(f"system_customers output to {args.output_type}", "output", df_system_customers_records)
 
                             # output csv
                             
                             if args.output_type == 'csv':
-                                df_system_customers.to_csv(os.path.join(data_dir,'system_customers.csv'))
+                                df_system_customers.to_csv(os.path.join(data_dir,'output\\system_customers.csv'), index=False)
 
                             # upload to SQL
                             
@@ -274,8 +229,12 @@ if __name__ == '__main__':
                                 if len(df_system_customers.index) == sql_system_customers_rows_written:
                                     logger.info("System Customers succesfully uploaded to SQL")
 
+                                    log_metric(f"records written to SQL for {fname}", "success", sql_system_customers_rows_written)                                
+
                                 else:
                                     logger.error(f"Record mismatch on System Customers SQL upload {sql_system_customers_rows_written} rows written instead of {len(df_system_customers.index)}")
+
+                                    log_metric(f"records written to SQL for {fname}", "failure", sql_system_customers_rows_written)     
 
                         else:
 
@@ -296,11 +255,16 @@ if __name__ == '__main__':
                     # read in csv file
                     df_system_book = pd.read_csv(os.path.join(data_dir, fname))
 
+                    log_metric(f"{fname}", "read in", len(df_system_book.index))                    
+
                     # check columns
                     expected_book_columns = ['Id', 'Books', 'Book checkout',  'Book Returned', 'Days allowed to borrow', 'Customer ID' ]
                     renamed_book_columns  = ['loan_id', 'book_name', 'checkout_date', 'return_date', 'loan_period', 'customer_id']
 
                     if list(df_system_book.columns) == expected_book_columns:
+
+                        # what number do we want here?
+                        log_metric(f"{fname}", "all columns correct", len(expected_book_columns))
 
                         # rename columns
                         df_system_book_rename = dict(zip(expected_book_columns, renamed_book_columns))   
@@ -312,6 +276,8 @@ if __name__ == '__main__':
                         )
 
                         df_system_book_blanks = df_system_book[mask_df_system_book_blanks].copy()
+                        
+                        log_metric(f"blank rows on {fname}", "dropped", len(df_system_book_blanks.index))
 
                         if len(df_system_book_blanks.index) > 0:
 
@@ -359,6 +325,8 @@ if __name__ == '__main__':
                                 (pd.isna(df_system_book['return_date']))
                             )
                             null_system_book_dates = df_system_book[mask_null_system_book_dates].copy()
+                        
+                            log_metric(f"null date rows on {fname}", "dropped", len(null_system_book_dates.index))
 
                             if len(null_system_book_dates.index) > 0:
 
@@ -379,6 +347,8 @@ if __name__ == '__main__':
                                 (pd.isna(df_system_book["loan_days"]))
                             )
                             df_system_book_invalid_loan_days = df_system_book[mask_invalid_loan_period].copy()
+                        
+                            log_metric(f"invalid Loan Period rows on {fname}", "dropped", len(df_system_book_invalid_loan_days.index))
 
                             if len(df_system_book_invalid_loan_days.index) > 0:
 
@@ -394,15 +364,23 @@ if __name__ == '__main__':
                             df_system_book = df_system_book[['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date', 'loan_days', 'actual_loaned_days']]
 
                             # check for dupes
+                            before_count = len(df_system_book)
+
                             df_system_book = df_system_book.sort_values(by = ['loan_id', 'customer_id', 'book_name', 'checkout_date', 'return_date' ])
                             df_system_book = df_system_book.drop_duplicates(subset = ['loan_id', 'customer_id', 'book_name', 'checkout_date'], keep = 'last')
+
+                            after_count = len(df_system_book)
+
+                            duplicates_removed = before_count - after_count
+
+                            log_metric(f"duplicate rows on {fname}", "dropped", duplicates_removed)
 
                             # output cleaned files
 
                             # output csv
                             
                             if args.output_type == 'csv':
-                                df_system_book.to_csv(os.path.join(data_dir,'system_book.csv'))
+                                df_system_book.to_csv(os.path.join(data_dir,'output\\system_book.csv'), index=False)
 
                             # upload to SQL
                             
@@ -411,9 +389,15 @@ if __name__ == '__main__':
         
                                 # check upload
                                 if len(df_system_book.index) == sql_system_book_rows_written:
+
                                     logger.info("System Book succesfully uploaded to SQL")
 
+                                    log_metric(f"records written to SQL for {fname}", "success", sql_system_book_rows_written)   
+
                                 else:
+
+                                    log_metric(f"records written to SQL for {fname}", "failure", sql_system_book_rows_written)   
+
                                     logger.error(f"Record mismatch on System Book SQL upload {sql_system_book_rows_written} rows written instead of {len(df_system_book.index)}")
 
                         else:
@@ -423,6 +407,16 @@ if __name__ == '__main__':
                     else: 
 
                         logger.info("System Book file does not have the correct columns in the correct order")
+
+            metrics_df = pd.DataFrame(metrics_rows)  
+
+            if args.output_type == 'csv':
+
+                metrics_df.to_csv(os.path.join(data_dir,'output\\metrics_tracking.csv'), index=False)
+
+            if args.output_type == 'sql':
+
+                metrics_df_rows_written = write_to_sql(metrics_df, "metrics_tracking", "dbo")
 
     else:
 
